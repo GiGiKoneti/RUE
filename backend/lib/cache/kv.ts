@@ -1,10 +1,14 @@
 import { Redis } from "@upstash/redis";
 import { RUEResponse } from "../rlm/types";
 
-const redis = new Redis({
-  url: process.env.UPSTASH_REDIS_REST_URL!,
-  token: process.env.UPSTASH_REDIS_REST_TOKEN!,
-});
+const isPlaceholder = !process.env.UPSTASH_REDIS_REST_URL || process.env.UPSTASH_REDIS_REST_URL.includes("your_upstash");
+
+const redis = isPlaceholder 
+  ? null 
+  : new Redis({
+      url: process.env.UPSTASH_REDIS_REST_URL!,
+      token: process.env.UPSTASH_REDIS_REST_TOKEN!,
+    });
 
 const TTL = 60 * 60 * 24 * 7; // 7 days in seconds
 
@@ -12,6 +16,7 @@ const TTL = 60 * 60 * 24 * 7; // 7 days in seconds
  * Fetches a cached response from Redis.
  */
 export async function getCachedResponse(cacheKey: string): Promise<RUEResponse | null> {
+  if (!redis) return null;
   try {
     const data = await redis.get<RUEResponse>(cacheKey);
     return data;
@@ -28,6 +33,7 @@ export async function setCachedResponse(
   cacheKey: string,
   response: RUEResponse
 ): Promise<void> {
+  if (!redis) return;
   try {
     await redis.set(cacheKey, response, { ex: TTL });
   } catch (error) {
@@ -39,6 +45,7 @@ export async function setCachedResponse(
  * Verifies the connection to Redis.
  */
 export async function checkCacheHealth(): Promise<boolean> {
+  if (!redis) return false;
   try {
     const pong = await redis.ping();
     return pong === "PONG";
