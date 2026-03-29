@@ -5,6 +5,7 @@ import { useExplorationStore } from '../store/explorationStore';
 import type { ChatNode as ChatNodeType } from '../types';
 import { truncateToSixWords } from '../features/rue/lib/analysis';
 import { useResizeObserver } from '../hooks/useResizeObserver';
+import { MasteryStars } from './MasteryStars';
 
 const HOLD_MS = 300;
 
@@ -216,6 +217,12 @@ const ChatNodeCard = React.memo(function ChatNodeCard({
             <p className="text-[10px] text-white/30">
               {node.childCount} branch{node.childCount > 1 ? 'es' : ''}
             </p>
+          )}
+
+          {node.masteryStars > 0 && (
+            <div className="mt-0.5">
+              <MasteryStars stars={node.masteryStars} size="sm" />
+            </div>
           )}
 
           {dotColor && node.depth > 0 && (

@@ -13,6 +13,8 @@ export interface ISaikiNode extends Document {
   depth: number;
   childCount: number;
   isFollowUp: boolean;
+  masteryStars: number;
+  probeHistory: { role: string; content: string }[];
   createdAt: Date;
 }
 
@@ -29,6 +31,8 @@ const SaikiNodeSchema = new Schema<ISaikiNode>({
   depth: { type: Number, default: 0 },
   childCount: { type: Number, default: 0 },
   isFollowUp: { type: Boolean, default: false },
+  masteryStars: { type: Number, default: 0 },
+  probeHistory: [{ role: { type: String }, content: { type: String } }],
   createdAt: { type: Date, default: Date.now },
 });
 

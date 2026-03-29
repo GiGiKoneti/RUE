@@ -144,21 +144,38 @@ router.get('/:sessionId/nodes', async (req, res) => {
   }
 });
 
-// POST /api/saiki/sessions/:sessionId/nodes
+// POST /api/saiki/sessions/:sessionId/nodes (upsert by sessionId + nodeId)
 router.post('/:sessionId/nodes', async (req, res) => {
   try {
-    const nodeData = req.body;
-    const node = new SaikiNode({
-      ...nodeData,
-      sessionId: req.params.sessionId,
-    });
-    await node.save();
+    const sessionId = req.params.sessionId;
+    const nodeData = req.body as Record<string, unknown>;
+    const nodeId = typeof nodeData.nodeId === 'string' ? nodeData.nodeId.trim() : '';
+    if (!nodeId) {
+      res.status(400).json({ error: 'nodeId required' });
+      return;
+    }
 
-    // Update session node count and preview terms
-    const session = await Session.findOne({ id: req.params.sessionId });
+    const doc = {
+      ...nodeData,
+      sessionId,
+      nodeId,
+      response: typeof nodeData.response === 'string' ? nodeData.response : '',
+    };
+
+    const existing = await SaikiNode.findOne({ sessionId, nodeId }).lean();
+
+    const node = await SaikiNode.findOneAndUpdate(
+      { sessionId, nodeId },
+      { $set: doc },
+      { new: true, upsert: true, setDefaultsOnInsert: true }
+    );
+
+    const session = await Session.findOne({ id: sessionId });
     if (session) {
-      session.nodeCount += 1;
-      if (node.depth === 0 && session.previewTerms.length === 0 && node.terms) {
+      if (!existing) {
+        session.nodeCount += 1;
+      }
+      if (node && node.depth === 0 && session.previewTerms.length === 0 && node.terms?.length) {
         session.previewTerms = node.terms.slice(0, 3);
       }
       session.updatedAt = new Date();

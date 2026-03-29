@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import type { ChatNode, GraphEdge } from '../types';
 import { calculateTreeLayout } from '../utils/treeLayout';
-import { computeLearningPath } from '../utils/learningPath';
+import { computeLearningPathNodes } from '../features/rue/lib/learningPath';
 
 interface ExplorationState {
   // Graph
@@ -27,6 +27,8 @@ interface ExplorationState {
   updateNodeResponse: (nodeId: string, response: string) => void;
   /** End of SSE stream: persist terms, stop streaming; summary filled via setNodeSummary */
   completeStreaming: (nodeId: string, terms: string[]) => void;
+  /** Refine explorable terms after LLM curation (streaming already false). */
+  setNodeTerms: (nodeId: string, terms: string[]) => void;
   setNodeSummary: (nodeId: string, summary: string) => void;
   /** Legacy single-shot finalize (uses completeStreaming + setNodeSummary pattern internally if needed) */
   finalizeNode: (nodeId: string, terms: string[], summary: string) => void;
@@ -45,8 +47,13 @@ interface ExplorationState {
   }) => void;
 
   setSessionId: (id: string | null) => void;
-  loadSession: (sessionId: string) => Promise<void>;
   persistNode: (nodeId: string) => Promise<void>;
+
+  // Socratic Tutor
+  setMasteryStars: (nodeId: string, stars: number) => void;
+  appendProbeMessage: (nodeId: string, msg: { role: 'tutor' | 'user'; content: string }) => void;
+  /** Clear probe thread before a fresh run (start / retake) so store matches API history. */
+  resetProbeHistory: (nodeId: string) => void;
 
   // Output Page Actions
   openOutputPage: (nodeId: string) => void;
@@ -97,7 +104,7 @@ export const useExplorationStore = create<ExplorationState>((set, get) => ({
         updatedNodes[id] = { ...updatedNodes[id], ...positions[id] };
       }
     });
-    const learningPath = computeLearningPath(Object.values(updatedNodes));
+    const learningPath = computeLearningPathNodes(updatedNodes);
     return { nodes: updatedNodes, learningPath };
   },
 
@@ -121,6 +128,8 @@ export const useExplorationStore = create<ExplorationState>((set, get) => ({
       isCollapsed: false,
       isFollowUp: false,
       localDepthLimit: null,
+      masteryStars: 0,
+      probeHistory: [],
     };
     const { nodes: nextNodes, learningPath: nextPath } = (get() as any)._recomputeLayout({ [id]: node });
     
@@ -164,6 +173,8 @@ export const useExplorationStore = create<ExplorationState>((set, get) => ({
       isCollapsed: false,
       isFollowUp,
       localDepthLimit: null,
+      masteryStars: 0,
+      probeHistory: [],
     };
 
     const nextNodesBeforeLayout = {
@@ -212,6 +223,18 @@ export const useExplorationStore = create<ExplorationState>((set, get) => ({
     });
   },
 
+  setNodeTerms: (nodeId, terms) => {
+    const s = get();
+    const node = s.nodes[nodeId];
+    if (!node) return;
+    set({
+      nodes: {
+        ...s.nodes,
+        [nodeId]: { ...node, terms },
+      },
+    });
+  },
+
   setNodeSummary: (nodeId, summary) => {
     const s = get();
     const node = s.nodes[nodeId];
@@ -238,6 +261,42 @@ export const useExplorationStore = create<ExplorationState>((set, get) => ({
           isStreaming: false,
           summaryPending: false,
         },
+      },
+    });
+  },
+
+  setMasteryStars: (nodeId, stars) => {
+    const s = get();
+    const node = s.nodes[nodeId];
+    if (!node) return;
+    set({
+      nodes: {
+        ...s.nodes,
+        [nodeId]: { ...node, masteryStars: stars },
+      },
+    });
+  },
+
+  appendProbeMessage: (nodeId, msg) => {
+    const s = get();
+    const node = s.nodes[nodeId];
+    if (!node) return;
+    set({
+      nodes: {
+        ...s.nodes,
+        [nodeId]: { ...node, probeHistory: [...node.probeHistory, msg] },
+      },
+    });
+  },
+
+  resetProbeHistory: (nodeId) => {
+    const s = get();
+    const node = s.nodes[nodeId];
+    if (!node) return;
+    set({
+      nodes: {
+        ...s.nodes,
+        [nodeId]: { ...node, probeHistory: [] },
       },
     });
   },
@@ -347,55 +406,6 @@ export const useExplorationStore = create<ExplorationState>((set, get) => ({
 
   setSessionId: (id) => set({ currentSessionId: id }),
 
-  loadSession: async (sessionId) => {
-    try {
-      const resp = await fetch(`http://localhost:3001/api/saiki/sessions/${sessionId}`);
-      const data = await resp.json();
-      if (!data.nodes) return;
-
-      const nodes: Record<string, ChatNode> = {};
-      const edges: GraphEdge[] = [];
-      let rootId: string | null = null;
-
-      data.nodes.forEach((n: any) => {
-        const id = n.nodeId;
-        nodes[id] = {
-          id,
-          parentId: n.parentId,
-          parentTerm: n.parentTerm,
-          prompt: n.prompt,
-          response: n.response,
-          terms: n.terms,
-          summary: n.summary,
-          summaryPending: false,
-          depth: n.depth,
-          childCount: n.childCount,
-          x: n.position?.x ?? 0,
-          y: n.position?.y ?? 0,
-          isStreaming: false,
-          isCollapsed: false,
-          isFollowUp: n.isFollowUp,
-          localDepthLimit: null,
-        };
-        if (!n.parentId) rootId = id;
-        if (n.parentId) {
-          edges.push({ id: `e_${n.parentId}_${id}`, fromId: n.parentId, toId: id });
-        }
-      });
-
-      const { nodes: layoutNodes, learningPath } = (get() as any)._recomputeLayout(nodes);
-
-      set({
-        nodes: layoutNodes,
-        edges,
-        learningPath,
-        rootNodeId: rootId,
-        currentSessionId: sessionId,
-      });
-    } catch (err) {
-      console.error('Failed to load session:', err);
-    }
-  },
 
   persistNode: async (nodeId) => {
     const s = get();
@@ -417,7 +427,7 @@ export const useExplorationStore = create<ExplorationState>((set, get) => ({
     };
 
     try {
-      await fetch(`http://localhost:3001/api/saiki/sessions/${s.currentSessionId}/nodes`, {
+      await fetch(`/api/saiki/sessions/${s.currentSessionId}/nodes`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),

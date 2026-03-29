@@ -175,7 +175,7 @@ export default function MagicRings({
     const quad = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material);
     scene.add(quad);
 
-    const resize = () => {
+    const applySize = () => {
       const w = mount.clientWidth;
       const h = mount.clientHeight;
       const dpr = Math.min(window.devicePixelRatio, 2);
@@ -183,6 +183,7 @@ export default function MagicRings({
       renderer.setPixelRatio(dpr);
       uniforms.uResolution.value.set(w * dpr, h * dpr);
     };
+    const resize = () => requestAnimationFrame(applySize);
     resize();
     window.addEventListener('resize', resize);
 
@@ -218,10 +219,19 @@ export default function MagicRings({
       burstRef.current *= 0.95;
       if (burstRef.current < 0.001) burstRef.current = 0;
 
+      const resolveColor = (colorStr: string) => {
+        if (colorStr.startsWith('var(')) {
+          const varName = colorStr.slice(4, -1).trim();
+          const resolved = getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
+          return resolved || '#ffffff';
+        }
+        return colorStr;
+      };
+
       uniforms.uTime.value = t * 0.001 * p.speed;
       uniforms.uAttenuation.value = p.attenuation;
-      uniforms.uColor.value.set(p.color);
-      uniforms.uColorTwo.value.set(p.colorTwo);
+      uniforms.uColor.value.set(resolveColor(p.color));
+      uniforms.uColorTwo.value.set(resolveColor(p.colorTwo));
       uniforms.uLineThickness.value = p.lineThickness;
       uniforms.uBaseRadius.value = p.baseRadius;
       uniforms.uRadiusStep.value = p.radiusStep;

@@ -34,6 +34,15 @@ export interface ChatNode {
   width?: number;
   height?: number;
   localDepthLimit: number | null;
+  /** Mastery stars: 0=untested, 1-3=rated by Socratic probe */
+  masteryStars: number;
+  /** Socratic probe conversation history */
+  probeHistory: ProbeMessage[];
+}
+
+export interface ProbeMessage {
+  role: 'tutor' | 'user';
+  content: string;
 }
 
 /** Alias aligned with RUE docs */

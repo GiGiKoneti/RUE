@@ -94,11 +94,12 @@ export async function streamExplanation(
 
     // Extract terms (skipped for summary-only calls)
     if (!options.noTerms) {
-      const regex = /<term>(.*?)<\/term>/g;
+      const regex = /<\s*term\s*>([\s\S]*?)<\s*\/\s*term\s*>/gi;
       let match;
       while ((match = regex.exec(currentText)) !== null) {
-        if (match[1]) {
-          res.write(`data: ${JSON.stringify({ type: 'term', term: match[1] })}\n\n`);
+        const inner = match[1]?.trim().replace(/\s+/g, ' ');
+        if (inner) {
+          res.write(`data: ${JSON.stringify({ type: 'term', term: inner })}\n\n`);
         }
       }
     }

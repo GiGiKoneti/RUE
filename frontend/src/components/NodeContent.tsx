@@ -7,6 +7,7 @@ import { useTextSelection } from '../hooks/useTextSelection';
 import type { ChatNode } from '../types';
 import TermsTray from './TermsTray';
 import SelectionBubble from './SelectionBubble';
+import { SocraticProbe } from './SocraticProbe';
 import { RenderedResponse } from '../features/rue/components/RenderedResponse';
 
 export function NodeContent({ node }: { node: ChatNode }) {
@@ -93,6 +94,8 @@ export function NodeContent({ node }: { node: ChatNode }) {
           }}
         />
       )}
+
+      <SocraticProbe nodeId={node.id} />
 
       <AnimatePresence>
         {customSelection &&

@@ -4,6 +4,7 @@ import clsx from 'clsx';
 import { useNodeAncestry } from '../hooks/useNodeAncestry';
 import { useExplorationStore } from '../store/explorationStore';
 import { truncateToSixWords } from '../features/rue/lib/analysis';
+import { MasteryStars } from './MasteryStars';
 import type { ChatNode } from '../types';
 
 export function OutputPageHeader({
@@ -69,6 +70,12 @@ export function OutputPageHeader({
           </React.Fragment>
         ))}
       </div>
+
+      {node.masteryStars > 0 && (
+        <div className="flex-shrink-0">
+          <MasteryStars stars={node.masteryStars} size="sm" />
+        </div>
+      )}
 
       <div className="relative flex-shrink-0" ref={menuRef}>
         <button

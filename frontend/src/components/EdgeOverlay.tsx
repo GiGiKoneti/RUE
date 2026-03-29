@@ -18,8 +18,8 @@ export default function EdgeOverlay() {
 
   return (
     <svg
-      className="absolute inset-0 pointer-events-none overflow-visible"
-      style={{ width: '100%', height: '100%' }}
+      className="absolute pointer-events-none z-[10]"
+      style={{ overflow: 'visible', width: 1, height: 1 }}
     >
       <defs>
         <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">

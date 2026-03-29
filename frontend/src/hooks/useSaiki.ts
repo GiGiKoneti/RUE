@@ -1,7 +1,15 @@
 import { useCallback, useState } from 'react';
 import { useExplorationStore } from '../store/explorationStore';
 import { truncateToSixWords } from '../features/rue/lib/analysis';
-import { filterTerms } from '../features/rue/lib/termFilter';
+import {
+  mergeExplorableTerms,
+  MIN_EXPLORABLE_TERMS,
+  combineLlmWithHeuristic,
+} from '../features/rue/lib/explorableTerms';
+import {
+  collectExcludeHintsForExtract,
+  filterTermsAgainstHints,
+} from '../features/rue/lib/explorationExclude';
 import { useSessionStore } from '../store/sessionStore';
 
 async function generateNodeSummary(response: string, prompt: string): Promise<string> {
@@ -48,6 +56,90 @@ async function generateNodeSummary(response: string, prompt: string): Promise<st
   }
 }
 
+async function fetchCuratedTermsFromApi(
+  responseText: string,
+  seedPrompt: string,
+  excludeHints: string[] = []
+): Promise<string[]> {
+  try {
+    const res = await fetch('/api/saiki/extract-terms', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        response: responseText,
+        seedPrompt,
+        excludeHints,
+      }),
+    });
+    if (!res.ok) return [];
+    const j = (await res.json()) as { terms?: unknown };
+    if (!Array.isArray(j.terms)) return [];
+    return j.terms.filter((x): x is string => typeof x === 'string');
+  } catch {
+    return [];
+  }
+}
+
+async function finalizeNodeAfterStream(
+  nodeId: string,
+  rawTerms: string[],
+  responseText: string,
+  summarySeedPrompt: string
+) {
+  const store = useExplorationStore;
+  const latest = store.getState().nodes[nodeId]?.response ?? responseText;
+  const node = store.getState().nodes[nodeId];
+  const parent = node?.parentId ? store.getState().nodes[node.parentId] : undefined;
+  const excludeHints = node
+    ? collectExcludeHintsForExtract(node.prompt, node.parentTerm, parent?.prompt ?? null)
+    : [];
+
+  const heuristicBase = mergeExplorableTerms(
+    [...new Set(rawTerms)],
+    latest,
+    MIN_EXPLORABLE_TERMS,
+    summarySeedPrompt
+  );
+  let heuristic = filterTermsAgainstHints(heuristicBase, excludeHints);
+  if (!heuristic.length) heuristic = heuristicBase;
+
+  store.getState().completeStreaming(nodeId, heuristic);
+
+  try {
+    const llm = await fetchCuratedTermsFromApi(latest, summarySeedPrompt, excludeHints);
+    if (llm.length > 0) {
+      let merged = combineLlmWithHeuristic(llm, heuristic, latest);
+      merged = filterTermsAgainstHints(merged, excludeHints);
+      if (!merged.length) merged = heuristic;
+      store.getState().setNodeTerms(nodeId, merged);
+      void store.getState().persistNode(nodeId);
+    }
+  } catch {
+    /* heuristic already applied */
+  }
+
+  void generateNodeSummary(latest, summarySeedPrompt).then((summary) => {
+    store.getState().setNodeSummary(nodeId, summary);
+    store.getState().persistNode(nodeId);
+  });
+}
+
+/** Gather all explored concept names from the graph for LLM exclusion context. */
+function buildExploredConceptsList(): string {
+  const nodes = useExplorationStore.getState().nodes;
+  const concepts = new Set<string>();
+  for (const n of Object.values(nodes)) {
+    if (n.parentTerm) concepts.add(n.parentTerm);
+    // Add the first few words of the prompt as a concept anchor
+    const short = n.prompt.split(/\s+/).slice(0, 5).join(' ');
+    if (short) concepts.add(short);
+    // Also add any existing terms
+    for (const t of n.terms) concepts.add(t);
+  }
+  if (concepts.size === 0) return '';
+  return [...concepts].join(', ');
+}
+
 export function useSaiki() {
   const store = useExplorationStore;
   const [isGlobalLoading, setIsGlobalLoading] = useState(false);
@@ -69,7 +161,7 @@ export function useSaiki() {
       const res = await fetch('/api/saiki/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: question, context: '' }),
+        body: JSON.stringify({ prompt: question, context: buildExploredConceptsList() }),
       });
 
       if (!res.body) throw new Error('No response body');
@@ -95,14 +187,10 @@ export function useSaiki() {
                 responseText += data.text;
                 store.getState().updateNodeResponse(nodeId, responseText);
               } else if (data.type === 'term' && data.term) {
-                const ft = filterTerms([data.term]);
-                if (ft.length) terms.push(ft[0]);
+                const t = data.term.trim();
+                if (t) terms.push(t);
               } else if (data.type === 'done') {
-                store.getState().completeStreaming(nodeId, filterTerms([...new Set(terms)]));
-                void generateNodeSummary(responseText, question).then((summary) => {
-                  store.getState().setNodeSummary(nodeId, summary);
-                  store.getState().persistNode(nodeId);
-                });
+                void finalizeNodeAfterStream(nodeId, terms, responseText, question);
               }
             } catch {
               /* ignore */
@@ -112,15 +200,31 @@ export function useSaiki() {
       }
       const stDone = store.getState().nodes[nodeId];
       if (stDone?.isStreaming) {
-        store.getState().completeStreaming(nodeId, filterTerms([...new Set(terms)]));
-        void generateNodeSummary(stDone.response, question).then((summary) => {
-          store.getState().setNodeSummary(nodeId, summary);
-          store.getState().persistNode(nodeId);
-        });
+        void finalizeNodeAfterStream(nodeId, terms, stDone.response, question);
       }
     } catch (err) {
       console.error('AskQuestion Error:', err);
-      store.getState().finalizeNode(nodeId, filterTerms(terms), truncateToSixWords(question));
+      const body = store.getState().nodes[nodeId]?.response ?? '';
+      const node = store.getState().nodes[nodeId];
+      const par = node?.parentId ? store.getState().nodes[node.parentId] : undefined;
+      const excl = node
+        ? collectExcludeHintsForExtract(node.prompt, node.parentTerm, par?.prompt ?? null)
+        : [];
+      let heuristic = mergeExplorableTerms([...new Set(terms)], body, MIN_EXPLORABLE_TERMS, question);
+      let hf = filterTermsAgainstHints(heuristic, excl);
+      if (!hf.length) hf = heuristic;
+      let merged = hf;
+      try {
+        const llm = await fetchCuratedTermsFromApi(body, question, excl);
+        if (llm.length) {
+          merged = combineLlmWithHeuristic(llm, hf, body);
+          merged = filterTermsAgainstHints(merged, excl);
+          if (!merged.length) merged = hf;
+        }
+      } catch {
+        /* keep heuristic */
+      }
+      store.getState().finalizeNode(nodeId, merged, truncateToSixWords(question));
     } finally {
       setIsGlobalLoading(false);
     }
@@ -161,7 +265,7 @@ export function useSaiki() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             prompt,
-            context: `Parent Prompt: ${parent.prompt}\nParent Response: ${parent.response}`,
+            context: buildExploredConceptsList(),
           }),
         });
 
@@ -188,14 +292,10 @@ export function useSaiki() {
                   responseText += data.text;
                   store.getState().updateNodeResponse(nodeId, responseText);
                 } else if (data.type === 'term' && data.term) {
-                  const ft = filterTerms([data.term]);
-                  if (ft.length) terms.push(ft[0]);
+                  const t = data.term.trim();
+                  if (t) terms.push(t);
                 } else if (data.type === 'done') {
-                  store.getState().completeStreaming(nodeId, filterTerms([...new Set(terms)]));
-                  void generateNodeSummary(responseText, prompt!).then((summary) => {
-                    store.getState().setNodeSummary(nodeId, summary);
-                    store.getState().persistNode(nodeId);
-                  });
+                  void finalizeNodeAfterStream(nodeId, terms, responseText, prompt!);
                 }
               } catch {
                 /* ignore */
@@ -205,15 +305,31 @@ export function useSaiki() {
         }
         const stEx = store.getState().nodes[nodeId];
         if (stEx?.isStreaming) {
-          store.getState().completeStreaming(nodeId, filterTerms([...new Set(terms)]));
-          void generateNodeSummary(stEx.response, prompt!).then((summary) => {
-            store.getState().setNodeSummary(nodeId, summary);
-            store.getState().persistNode(nodeId);
-          });
+          void finalizeNodeAfterStream(nodeId, terms, stEx.response, prompt!);
         }
       } catch (err) {
         console.error('Explore Error:', err);
-        store.getState().finalizeNode(nodeId, filterTerms(terms), truncateToSixWords(prompt!));
+        const body = store.getState().nodes[nodeId]?.response ?? '';
+        const n = store.getState().nodes[nodeId];
+        const p = n?.parentId ? store.getState().nodes[n.parentId] : undefined;
+        const excl = n
+          ? collectExcludeHintsForExtract(n.prompt, n.parentTerm, p?.prompt ?? null)
+          : [];
+        let heuristic = mergeExplorableTerms([...new Set(terms)], body, MIN_EXPLORABLE_TERMS, prompt!);
+        let hf = filterTermsAgainstHints(heuristic, excl);
+        if (!hf.length) hf = heuristic;
+        let merged = hf;
+        try {
+          const llm = await fetchCuratedTermsFromApi(body, prompt!, excl);
+          if (llm.length) {
+            merged = combineLlmWithHeuristic(llm, hf, body);
+            merged = filterTermsAgainstHints(merged, excl);
+            if (!merged.length) merged = hf;
+          }
+        } catch {
+          /* keep heuristic */
+        }
+        store.getState().finalizeNode(nodeId, merged, truncateToSixWords(prompt!));
       }
     },
     []

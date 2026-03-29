@@ -1,3 +1,12 @@
+/**
+ * Learning-path DAG for RUE mind-map exploration.
+ *
+ * Semantics: an edge `nodeId` → depends on → `prereqId` means “finish `prereqId` before `nodeId`”.
+ * - Structural: each parent synthesis assumes its direct child drills; children come before parent
+ *   (leaves-to-root along branches).
+ * - Term overlap: if B’s answer references A’s extracted terms, A comes before B (non-ancestor pairs only).
+ * Topological order uses Kahn with tie-break: higher `depth` first, then stable `id`.
+ */
 import type { ChatNode } from '../../../types';
 
 export type RUENode = ChatNode;
@@ -50,6 +59,13 @@ function deduplicatePrereqs(prereqs: Prerequisite[]): Prerequisite[] {
   return Array.from(map.values());
 }
 
+function cmpTopoId(a: string, b: string, nodes: Record<string, RUENode>): number {
+  const da = nodes[a]?.depth ?? 0;
+  const db = nodes[b]?.depth ?? 0;
+  if (db !== da) return db - da;
+  return a.localeCompare(b);
+}
+
 function kahnAllNodesReachable(
   prereqs: Prerequisite[],
   ids: string[],
@@ -68,7 +84,7 @@ function kahnAllNodesReachable(
   const queue = ids.filter((id) => inDegree[id] === 0);
   let seen = 0;
   while (queue.length > 0) {
-    queue.sort((a, b) => (nodes[a]?.depth ?? 0) - (nodes[b]?.depth ?? 0));
+    queue.sort((a, b) => cmpTopoId(a, b, nodes));
     const c = queue.shift()!;
     seen++;
     for (const d of adj[c] ?? []) {
@@ -124,12 +140,12 @@ function kahnOrder(
 
   const queue = nodeList
     .filter((n) => inDegree[n.id] === 0)
-    .sort((a, b) => a.depth - b.depth)
+    .sort((a, b) => cmpTopoId(a.id, b.id, nodes))
     .map((n) => n.id);
 
   const orderedIds: string[] = [];
   while (queue.length > 0) {
-    queue.sort((a, b) => (nodes[a]?.depth ?? 0) - (nodes[b]?.depth ?? 0));
+    queue.sort((a, b) => cmpTopoId(a, b, nodes));
     const current = queue.shift()!;
     orderedIds.push(current);
     dependents[current].forEach((dependent) => {
@@ -138,9 +154,10 @@ function kahnOrder(
     });
   }
 
-  nodeList.forEach((n) => {
-    if (!orderedIds.includes(n.id)) orderedIds.push(n.id);
-  });
+  const missing = nodeList
+    .filter((n) => !orderedIds.includes(n.id))
+    .sort((a, b) => cmpTopoId(a.id, b.id, nodes));
+  missing.forEach((n) => orderedIds.push(n.id));
 
   return orderedIds;
 }
@@ -162,11 +179,13 @@ export function computeLearningPath(nodes: Record<string, RUENode>): LearningPat
 
   const prerequisites: Prerequisite[] = [];
 
+  /* Tree exploration: deeper (child) nodes drill into concepts; the parent “synthesis”
+   * assumes those ideas — so study children before parents (leaves → root along branches). */
   nodeList.forEach((node) => {
     if (node.parentId && nodes[node.parentId]) {
       prerequisites.push({
-        nodeId: node.id,
-        prereqId: node.parentId,
+        nodeId: node.parentId,
+        prereqId: node.id,
         reason: 'structural',
         overlappingTerms: [],
         confidence: 1,
@@ -182,13 +201,15 @@ export function computeLearningPath(nodes: Record<string, RUENode>): LearningPat
 
       const nodeBResponseLower = nodeB.response.toLowerCase();
       const overlapping = nodeA.terms.filter((term) => {
-        const t = term.toLowerCase();
+        const t = term.trim().toLowerCase();
+        if (t.length < 4) return false;
         const wordBoundaryRegex = new RegExp(`\\b${escapeRegex(t)}\\b`, 'i');
         return wordBoundaryRegex.test(nodeBResponseLower);
       });
 
-      if (overlapping.length >= 2) {
-        const confidence = Math.min(overlapping.length / 4, 1);
+      /* Node B references A’s extracted terms → understand A before B (same as tree direction). */
+      if (overlapping.length >= 1) {
+        const confidence = Math.min(0.55 + overlapping.length * 0.15, 1);
         prerequisites.push({
           nodeId: nodeB.id,
           prereqId: nodeA.id,
@@ -217,4 +238,15 @@ export function computeLearningPath(nodes: Record<string, RUENode>): LearningPat
   });
 
   return { orderedIds, prerequisites: acyclicPrereqs, nodeMetadata };
+}
+
+/** Ordered `ChatNode`s for the store — same DAG as the Learning Path panel. */
+export function computeLearningPathNodes(nodes: Record<string, RUENode>): RUENode[] {
+  const { orderedIds } = computeLearningPath(nodes);
+  const out: RUENode[] = [];
+  for (const id of orderedIds) {
+    const n = nodes[id];
+    if (n) out.push(n);
+  }
+  return out;
 }

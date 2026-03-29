@@ -29,6 +29,8 @@ interface RawSaikiNodeDoc {
   depth?: number;
   childCount?: number;
   isFollowUp?: boolean;
+  masteryStars?: number;
+  probeHistory?: { role: 'tutor' | 'user'; content: string }[];
 }
 
 interface SessionState {
@@ -149,6 +151,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           isCollapsed: false,
           isFollowUp: Boolean(raw.isFollowUp),
           localDepthLimit: null,
+          masteryStars: typeof raw.masteryStars === 'number' ? raw.masteryStars : 0,
+          probeHistory: Array.isArray(raw.probeHistory) ? raw.probeHistory : [],
         };
       }
 
@@ -166,7 +170,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         Object.values(records).find((n) => n.parentId === null)?.id ??
         null;
 
-      exploreStore.hydrateGraph({ nodes: records, edges, rootNodeId });
+      exploreStore.hydrateGraph({ nodes: records, edges, rootNodeId, sessionId });
       exploreStore.fitAll();
     } catch (err) {
       console.error('Failed to load session', err);

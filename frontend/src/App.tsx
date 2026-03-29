@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import clsx from 'clsx';
 import { AnimatePresence } from 'framer-motion';
 import { useExplorationStore } from './store/explorationStore';
+import { getJudgeDemoStarter } from './data/judgeDemoStarter';
 import { useSessionStore } from './store/sessionStore';
 import { useSettingsStore } from './store/settingsStore';
 import { useSaiki } from './hooks/useSaiki';
@@ -24,8 +25,31 @@ function App() {
 
   useEffect(() => {
     initSettings();
-    
-    // Keyboard Shortcuts
+  }, [initSettings]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('demo') === '1' || params.get('judge') === '1') {
+      const starter = getJudgeDemoStarter();
+      useExplorationStore.getState().hydrateGraph({
+        nodes: starter.nodes,
+        edges: starter.edges,
+        rootNodeId: starter.rootNodeId,
+        sessionId: null,
+      });
+      params.delete('demo');
+      params.delete('judge');
+      const q = params.toString();
+      window.history.replaceState({}, '', q ? `?${q}` : window.location.pathname);
+      return;
+    }
+    const sessionId = params.get('session');
+    if (sessionId) {
+      void loadSession(sessionId);
+    }
+  }, [loadSession]);
+
+  useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'b') {
         e.preventDefault();
@@ -41,14 +65,8 @@ function App() {
       }
     };
     window.addEventListener('keydown', handleKeyDown);
-
-    const params = new URLSearchParams(window.location.search);
-    const sessionId = params.get('session');
-    if (sessionId) {
-      loadSession(sessionId);
-    }
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [loadSession, initSettings, sidebarOpen, setSidebarOpen, createSession]);
+  }, [sidebarOpen, setSidebarOpen, createSession]);
 
   const isExploring = rootNodeId !== null;
   const anyStreaming = Object.values(nodes).some((n) => n.isStreaming);

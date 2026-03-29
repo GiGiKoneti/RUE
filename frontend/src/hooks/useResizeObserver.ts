@@ -9,10 +9,14 @@ export function useResizeObserver(
     const element = ref.current;
     if (!element) return;
 
+    // Defer to the next frame so layout/state updates don’t re-enter ResizeObserver
+    // in the same tick (avoids "ResizeObserver loop completed with undelivered notifications").
     const observer = new ResizeObserver((entries) => {
-      if (entries[0]) {
-        callback(entries[0]);
-      }
+      const entry = entries[0];
+      if (!entry) return;
+      requestAnimationFrame(() => {
+        callback(entry);
+      });
     });
 
     observer.observe(element);

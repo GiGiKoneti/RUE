@@ -1,8 +1,14 @@
-import { useMemo, useState, useCallback } from 'react';
+import { useMemo, useState, useCallback, type ReactNode } from 'react';
 import clsx from 'clsx';
 import { motion, useReducedMotion } from 'framer-motion';
 import { Check, Copy } from 'lucide-react';
 import type { ChatNode } from '../../../types';
+import { mergeExplorableTerms, MIN_EXPLORABLE_TERMS } from '../lib/explorableTerms';
+import {
+  collectNeverHighlightKeys,
+  collectExcludeHintsForExtract,
+  filterTermsAgainstHints,
+} from '../lib/explorationExclude';
 
 export type RUENode = ChatNode;
 
@@ -121,74 +127,177 @@ export function parseResponse(raw: string, isStreaming: boolean): Segment[] {
   return segments;
 }
 
-function renderInline(
+/** Private-use markers so `**…**` / `*…*` never swallow `<term>…</term>` bodies. */
+const TERM_MARK = '\uE000';
+const TERM_MARK_END = '\uE001';
+const PROT_MARK = '\uE002';
+const PROT_END = '\uE003';
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Remove model <term> markup so we can re-apply a single authoritative highlight pass. */
+function stripTermXmlToPlain(text: string): string {
+  let s = text.replace(/<\s*term\s*>([\s\S]*?)<\s*\/\s*term\s*>/gi, '$1');
+  s = s.replace(/<\s*\/\s*term\s*>/gi, '');
+  s = s.replace(/<\s*term\s*>/gi, '');
+  return s;
+}
+
+/**
+ * One clickable chip per canonical term (longest-first), **first occurrence in the whole answer** —
+ * `globalConsumed` is shared across paragraphs/lists so we never re-chip the same phrase later.
+ */
+function injectAuthoritativeTermsOnce(
   text: string,
+  terms: string[],
+  globalConsumed: Set<string>
+): string {
+  if (!terms.length) return stripTermXmlToPlain(text);
+  let s = stripTermXmlToPlain(text);
+  const sorted = [...new Set(terms.map((t) => t.trim()).filter((t) => t.length >= 2))].sort(
+    (a, b) => b.length - a.length
+  );
+
+  for (const canonical of sorted) {
+    const key = canonical.toLowerCase();
+    if (globalConsumed.has(key)) continue;
+
+    const regions: string[] = [];
+    let work = s.replace(/<\s*term\s*>[\s\S]*?<\s*\/\s*term\s*>/gi, (block) => {
+      const i = regions.length;
+      regions.push(block);
+      return `${PROT_MARK}${i}${PROT_END}`;
+    });
+
+    const esc = escapeRegExp(canonical);
+    let replaced = false;
+
+    work = work.replace(new RegExp(`\\*\\*\\s*${esc}\\s*\\*\\*`, 'gi'), (full) => {
+      if (replaced) return full;
+      replaced = true;
+      return `<term>${canonical}</term>`;
+    });
+
+    if (!replaced) {
+      work = work.replace(new RegExp(`\\b${esc}\\b`, 'gi'), (full) => {
+        if (replaced) return full;
+        replaced = true;
+        return `<term>${canonical}</term>`;
+      });
+    }
+
+    s = work.replace(new RegExp(`${PROT_MARK}(\\d+)${PROT_END}`, 'g'), (_, idx) => {
+      const i = parseInt(idx, 10);
+      return regions[i] ?? '';
+    });
+
+    if (replaced) globalConsumed.add(key);
+  }
+
+  return s;
+}
+
+/** Match sloppy model output: `< term >`, newlines inside tags, `</TERM>`. */
+function maskTerms(raw: string, termsOut: string[], isStreaming: boolean): string {
+  const complete = /<\s*term\s*>([\s\S]*?)<\s*\/\s*term\s*>/gi;
+  let s = raw.replace(complete, (_, inner: string) => {
+    const term = inner.trim().replace(/\s+/g, ' ');
+    if (!term) return _;
+    const i = termsOut.length;
+    termsOut.push(term);
+    return `${TERM_MARK}${i}${TERM_MARK_END}`;
+  });
+
+  if (isStreaming) {
+    s = s.replace(/<\s*term\s*>((?:(?!<\s*\/\s*term\s*>)[\s\S])*)$/i, (full, inner: string) => {
+      const term = String(inner).trim().replace(/\s+/g, ' ');
+      if (!term) return full;
+      const i = termsOut.length;
+      termsOut.push(term);
+      return `${TERM_MARK}${i}${TERM_MARK_END}`;
+    });
+  }
+
+  return s;
+}
+
+function termChip(
+  term: string,
+  key: string,
   onTermClick: (term: string) => void,
   exploredTerms: string[]
-): React.ReactNode[] {
-  const parts: React.ReactNode[] = [];
-  const regex = /<term>(.*?)<\/term>|`([^`]+)`|\*\*([^*]+)\*\*|\*([^*]+)\*/g;
+): ReactNode {
+  const explored = exploredTerms.some((e) => e.toLowerCase() === term.toLowerCase());
+  return (
+    <span
+      key={key}
+      data-term={term}
+      role="button"
+      tabIndex={0}
+      onClick={(e) => {
+        e.stopPropagation();
+        onTermClick(term);
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onTermClick(term);
+        }
+      }}
+      className={clsx(
+        'relative z-10 inline cursor-pointer pointer-events-auto transition-all duration-150 align-baseline',
+        'rounded-md px-1.5 py-0.5 font-medium',
+        'bg-[var(--accent)]/22 text-[#c4f1ff] ring-1 ring-inset ring-[var(--accent)]/45',
+        explored ? 'opacity-75' : '',
+        'hover:bg-[var(--accent)]/32 hover:text-white hover:ring-[var(--accent)]/60'
+      )}
+    >
+      {term}
+      {explored && <sup className="ml-0.5 text-[8px] opacity-50">✓</sup>}
+    </span>
+  );
+}
+
+/** Inline markdown (code, bold, italic) only — term tags must already be masked. */
+function renderMarkdownFragments(text: string, keyPrefix: string): ReactNode[] {
+  const parts: ReactNode[] = [];
+  const regex = /`([^`]+)`|\*\*([^*]+)\*\*|\*([^*]+)\*/g;
   let last = 0;
   let match: RegExpExecArray | null;
+  let frag = 0;
 
   while ((match = regex.exec(text)) !== null) {
     if (match.index > last) {
-      parts.push(<span key={`t-${last}-${match.index}`}>{text.slice(last, match.index)}</span>);
+      parts.push(
+        <span key={`${keyPrefix}-t-${frag++}`}>{text.slice(last, match.index)}</span>
+      );
     }
 
     if (match[1] !== undefined) {
-      const term = match[1];
-      const explored = exploredTerms.some((e) => e.toLowerCase() === term.toLowerCase());
-      parts.push(
-        <span
-          key={`term-${match.index}`}
-          data-term={term}
-          role="button"
-          tabIndex={0}
-          onClick={(e) => {
-            e.stopPropagation();
-            onTermClick(term);
-          }}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              e.preventDefault();
-              onTermClick(term);
-            }
-          }}
-          className={clsx(
-            'cursor-pointer transition-all duration-150 rounded-sm px-0.5',
-            'border-b border-dashed',
-            explored
-              ? 'border-[var(--accent)] text-[var(--accent)] opacity-70'
-              : 'border-[var(--accent)]/50 text-[var(--accent)]/90',
-            'hover:border-[var(--accent)] hover:text-[var(--accent)]',
-            'hover:bg-[var(--accent)]/8'
-          )}
-        >
-          {term}
-          {explored && <sup className="ml-0.5 text-[8px] opacity-50">✓</sup>}
-        </span>
-      );
-    } else if (match[2] !== undefined) {
       parts.push(
         <code
-          key={`ic-${match.index}`}
+          key={`${keyPrefix}-c-${frag++}`}
           className="px-1.5 py-0.5 rounded-md text-[0.85em] font-mono
                      bg-white/[0.08] text-white/80 border border-white/[0.08]"
         >
-          {match[2]}
+          {match[1]}
         </code>
+      );
+    } else if (match[2] !== undefined) {
+      parts.push(
+        <strong
+          key={`${keyPrefix}-b-${frag++}`}
+          className="font-semibold text-[#a5f3fc] bg-cyan-500/15 px-1 rounded"
+        >
+          {match[2]}
+        </strong>
       );
     } else if (match[3] !== undefined) {
       parts.push(
-        <strong key={`b-${match.index}`} className="font-semibold text-white/95">
+        <em key={`${keyPrefix}-i-${frag++}`} className="italic text-[#e9d5ff] font-medium">
           {match[3]}
-        </strong>
-      );
-    } else if (match[4] !== undefined) {
-      parts.push(
-        <em key={`i-${match.index}`} className="italic text-white/75">
-          {match[4]}
         </em>
       );
     }
@@ -197,10 +306,54 @@ function renderInline(
   }
 
   if (last < text.length) {
-    parts.push(<span key="t-end">{text.slice(last)}</span>);
+    parts.push(<span key={`${keyPrefix}-end`}>{text.slice(last)}</span>);
   }
 
   return parts;
+}
+
+function renderInline(
+  text: string,
+  onTermClick: (term: string) => void,
+  exploredTerms: string[],
+  syncTerms: string[],
+  isStreaming: boolean,
+  highlightBudget: Set<string>
+): ReactNode[] {
+  const extracted: string[] = [];
+  let enriched: string;
+  if (!isStreaming && syncTerms.length) {
+    // Authoritative pass: inject <term> tags for known syncTerms
+    enriched = injectAuthoritativeTermsOnce(text, syncTerms, highlightBudget);
+  } else {
+    // Preserve raw <term> tags from LLM response — don't strip them!
+    // maskTerms will extract them into clickable chips.
+    enriched = text;
+  }
+  const masked = maskTerms(enriched, extracted, isStreaming);
+  const tokenRe = new RegExp(`${TERM_MARK}(\\d+)${TERM_MARK_END}`, 'g');
+  const out: ReactNode[] = [];
+  let last = 0;
+  let m: RegExpExecArray | null;
+  let seq = 0;
+
+  while ((m = tokenRe.exec(masked)) !== null) {
+    if (m.index > last) {
+      out.push(...renderMarkdownFragments(masked.slice(last, m.index), `x-${seq++}`));
+    }
+    const idx = parseInt(m[1], 10);
+    const term = extracted[idx];
+    if (term !== undefined) {
+      out.push(termChip(term, `term-${seq++}`, onTermClick, exploredTerms));
+    }
+    last = tokenRe.lastIndex;
+  }
+
+  if (last < masked.length) {
+    out.push(...renderMarkdownFragments(masked.slice(last), `x-${seq++}`));
+  }
+
+  return out;
 }
 
 const LANGUAGE_COLORS: Record<string, string> = {
@@ -289,6 +442,24 @@ export function RenderedResponse({
     [node.response, node.isStreaming]
   );
 
+  const syncTerms = useMemo(() => {
+    const hints = collectExcludeHintsForExtract(node.prompt, node.parentTerm, null);
+    if (node.isStreaming) return node.terms;
+    if (node.terms.length > 0) {
+      const f = filterTermsAgainstHints(node.terms, hints);
+      return f.length ? f : node.terms;
+    }
+    const merged = mergeExplorableTerms([], node.response, MIN_EXPLORABLE_TERMS);
+    const mf = filterTermsAgainstHints(merged, hints);
+    return mf.length ? mf : merged;
+  }, [node.isStreaming, node.terms, node.response, node.prompt, node.parentTerm]);
+
+  const neverHighlightSeed = useMemo(
+    () => collectNeverHighlightKeys(node.prompt, node.parentTerm),
+    [node.prompt, node.parentTerm]
+  );
+  const highlightBudget = new Set(neverHighlightSeed);
+
   return (
     <div className="space-y-4 text-[15px] font-[Inter] leading-[1.8] text-white/78">
       {segments.map((seg, idx) => {
@@ -296,7 +467,14 @@ export function RenderedResponse({
           case 'paragraph':
             return (
               <p key={idx} className="text-white/78">
-                {renderInline(seg.content, onTermClick, exploredTerms)}
+                {renderInline(
+                  seg.content,
+                  onTermClick,
+                  exploredTerms,
+                  syncTerms,
+                  node.isStreaming,
+                  highlightBudget
+                )}
               </p>
             );
           case 'blockquote':
@@ -313,7 +491,14 @@ export function RenderedResponse({
                     opacity: 0.4,
                   }}
                 />
-                {renderInline(seg.content, onTermClick, exploredTerms)}
+                {renderInline(
+                  seg.content,
+                  onTermClick,
+                  exploredTerms,
+                  syncTerms,
+                  node.isStreaming,
+                  highlightBudget
+                )}
               </blockquote>
             );
           case 'hr':
@@ -333,7 +518,16 @@ export function RenderedResponse({
                       className="mt-[0.6em] w-1 h-1 rounded-full flex-shrink-0"
                       style={{ background: 'var(--accent)', opacity: 0.5 }}
                     />
-                    <span className="text-white/72">{renderInline(item, onTermClick, exploredTerms)}</span>
+                    <span className="text-white/72">
+                      {renderInline(
+                        item,
+                        onTermClick,
+                        exploredTerms,
+                        syncTerms,
+                        node.isStreaming,
+                        highlightBudget
+                      )}
+                    </span>
                   </li>
                 ))}
               </ul>

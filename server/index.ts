@@ -6,6 +6,8 @@ import sessionRoutes from './routes/sessions';
 import userRoutes from './routes/users';
 import streamRouter from './routes/stream';
 import statsRouter from './routes/stats';
+import extractTermsRouter from './routes/extractTerms';
+import probeRouter from './routes/probe';
 
 import path from 'path';
 
@@ -29,6 +31,8 @@ app.use('/api/saiki/sessions', sessionRoutes);
 app.use('/api/saiki/users', userRoutes);
 app.use('/api/saiki/stream', streamRouter);
 app.use('/api/saiki/stats', statsRouter);
+app.use('/api/saiki/extract-terms', extractTermsRouter);
+app.use('/api/saiki/probe', probeRouter);
 
 // Database Connection
 mongoose

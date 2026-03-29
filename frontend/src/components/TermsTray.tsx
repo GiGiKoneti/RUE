@@ -7,6 +7,15 @@ import { TermChip } from './TermChip';
 import FollowUpBar from './FollowUpBar';
 import type { ChatNode } from '../types';
 import { filterTerms } from '../features/rue/lib/termFilter';
+import {
+  mergeExplorableTerms,
+  MIN_EXPLORABLE_TERMS,
+  MAX_EXPLORABLE_TERMS,
+} from '../features/rue/lib/explorableTerms';
+import {
+  collectExcludeHintsForExtract,
+  filterTermsAgainstHints,
+} from '../features/rue/lib/explorationExclude';
 
 interface TermsTrayProps {
   node: ChatNode;
@@ -45,15 +54,27 @@ export default function TermsTray({
       .filter(Boolean) as string[];
   }, [node.id, nodes]);
 
+  const suggestedTerms = useMemo(() => {
+    const hints = collectExcludeHintsForExtract(node.prompt, node.parentTerm, null);
+    if (node.isStreaming) return [];
+    if (node.terms.length > 0) {
+      const f = filterTermsAgainstHints(node.terms, hints);
+      return f.length ? f : node.terms;
+    }
+    const merged = mergeExplorableTerms([], node.response, MIN_EXPLORABLE_TERMS);
+    const mf = filterTermsAgainstHints(merged, hints);
+    return mf.length ? mf : merged;
+  }, [node.isStreaming, node.terms, node.response, node.prompt, node.parentTerm]);
+
   const allVisibleTerms = useMemo(() => {
-    const combined = [...node.terms];
+    const combined = [...suggestedTerms];
     customTerms.forEach((ct) => {
       if (!combined.some((t) => t.toLowerCase() === ct.toLowerCase())) {
         combined.push(ct);
       }
     });
     return combined;
-  }, [node.terms, customTerms]);
+  }, [suggestedTerms, customTerms]);
 
   function toggleTerm(term: string) {
     setSelectedTerms((prev) =>
@@ -121,17 +142,23 @@ export default function TermsTray({
       onKeyDown={handleTrayKeyDown}
       onClick={(e) => e.stopPropagation()}
     >
-      <div className="flex items-center justify-between mb-2.5">
-        <p className="text-[10px] uppercase tracking-widest text-white/25 font-[Inter]">
-          Explorable Terms
-        </p>
+      <div className="flex items-start justify-between gap-2 mb-2.5">
+        <div className="min-w-0">
+          <p className="text-[10px] uppercase tracking-widest text-white/25 font-[Inter]">
+            Explorable terms
+          </p>
+          <p className="text-[10px] text-white/35 font-[Inter] mt-0.5 leading-snug">
+            Highlighted phrases above — {MIN_EXPLORABLE_TERMS}–{MAX_EXPLORABLE_TERMS} quality concepts
+            when the model cooperates; click a chip or highlight to branch.
+          </p>
+        </div>
         <button
           type="button"
           onClick={() => {
             setAddingTerm(true);
             window.setTimeout(() => addInputRef.current?.focus(), 50);
           }}
-          className="flex items-center gap-1 text-[10px] text-white/30
+          className="flex shrink-0 self-start items-center gap-1 text-[10px] text-white/30
                      hover:text-[var(--accent)]/70 transition-colors duration-150 font-[Inter]"
         >
           <Plus className="w-3 h-3" />
